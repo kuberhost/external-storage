@@ -144,6 +144,7 @@ func (u *RBDUtil) DeleteImage(image string, pOpts *rbdProvisionOptions) error {
 }
 
 func (u *RBDUtil) execCommand(command string, args []string) ([]byte, error) {
+	glog.V(4).Infof("rbd execCommand: %s", strings.Join(args, " "))
 	cmd := exec.Command(command, args...)
 	return cmd.CombinedOutput()
 }
