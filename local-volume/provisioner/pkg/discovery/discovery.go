@@ -27,8 +27,8 @@ import (
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/common"
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/metrics"
 
-	esUtil "github.com/kubernetes-incubator/external-storage/lib/util"
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/deleter"
+	esUtil "github.com/kubernetes-sigs/sig-storage-lib-external-provisioner/util"
 	"k8s.io/api/core/v1"
 	storagev1listers "k8s.io/client-go/listers/storage/v1"
 	"k8s.io/client-go/tools/cache"
@@ -168,6 +168,15 @@ func (d *Discoverer) getReclaimPolicyFromStorageClass(name string) (v1.Persisten
 	return v1.PersistentVolumeReclaimDelete, nil
 }
 
+func (d *Discoverer) getMountOptionsFromStorageClass(name string) ([]string, error) {
+	class, err := d.classLister.Get(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return class.MountOptions, nil
+}
+
 func (d *Discoverer) discoverVolumesAtPath(class string, config common.MountConfig) {
 	glog.V(7).Infof("Discovering volumes at hostpath %q, mount path %q for storage class %q", config.HostDir, config.MountDir, class)
 
@@ -188,7 +197,7 @@ func (d *Discoverer) discoverVolumesAtPath(class string, config common.MountConf
 		return
 	}
 
-	// Retreive list of mount points to iterate through discovered paths (aka files) below
+	// Retrieve list of mount points to iterate through discovered paths (aka files) below
 	mountPoints, mountPointsErr := d.RuntimeConfig.Mounter.List()
 	if mountPointsErr != nil {
 		glog.Errorf("Error retreiving mountpoints: %v", err)
@@ -231,6 +240,12 @@ func (d *Discoverer) discoverVolumesAtPath(class string, config common.MountConf
 			continue
 		}
 
+		mountOptions, err := d.getMountOptionsFromStorageClass(class)
+		if err != nil {
+			glog.Errorf("Failed to get mount options from storage class %s: %v", class, err)
+			continue
+		}
+
 		var capacityByte int64
 		desireVolumeMode := v1.PersistentVolumeMode(config.VolumeMode)
 		switch volMode {
@@ -239,6 +254,10 @@ func (d *Discoverer) discoverVolumesAtPath(class string, config common.MountConf
 			if err != nil {
 				glog.Errorf("Path %q block stats error: %v", filePath, err)
 				continue
+			}
+			if desireVolumeMode == v1.PersistentVolumeBlock && len(mountOptions) != 0 {
+				glog.Warningf("Path %q will be used to create block volume, "+
+					"mount options %v will not take effect.", filePath, mountOptions)
 			}
 		case v1.PersistentVolumeFilesystem:
 			if desireVolumeMode == v1.PersistentVolumeBlock {
@@ -260,7 +279,7 @@ func (d *Discoverer) discoverVolumesAtPath(class string, config common.MountConf
 			continue
 		}
 
-		d.createPV(file, class, reclaimPolicy, config, capacityByte, desireVolumeMode, startTime)
+		d.createPV(file, class, reclaimPolicy, mountOptions, config, capacityByte, desireVolumeMode, startTime)
 	}
 }
 
@@ -273,7 +292,7 @@ func generatePVName(file, node, class string) string {
 	return fmt.Sprintf("local-pv-%x", h.Sum32())
 }
 
-func (d *Discoverer) createPV(file, class string, reclaimPolicy v1.PersistentVolumeReclaimPolicy, config common.MountConfig, capacityByte int64, volMode v1.PersistentVolumeMode, startTime time.Time) {
+func (d *Discoverer) createPV(file, class string, reclaimPolicy v1.PersistentVolumeReclaimPolicy, mountOptions []string, config common.MountConfig, capacityByte int64, volMode v1.PersistentVolumeMode, startTime time.Time) {
 	pvName := generatePVName(file, d.Node.Name, class)
 	outsidePath := filepath.Join(config.HostDir, file)
 
@@ -289,6 +308,7 @@ func (d *Discoverer) createPV(file, class string, reclaimPolicy v1.PersistentVol
 		ProvisionerName: d.Name,
 		VolumeMode:      volMode,
 		Labels:          d.Labels,
+		MountOptions:    mountOptions,
 	}
 
 	if d.UseAlphaAPI {
